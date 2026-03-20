@@ -1,101 +1,214 @@
 package main
 
 import (
-	"fmt"
-	"os/exec"
-	"os"
-	"path/filepath"
-	"golang.org/x/mod/modfile"
-	"encoding/json"
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+
+	"golang.org/x/mod/modfile"
+)
+
+const (
+	cloneTimeout = 15 * time.Minute
+	listTimeout  = 20 * time.Minute
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <repository-url>\n", os.Args[0])
-		os.Exit(2)
+	os.Exit(run())
+}
+
+func run() int {
+	jsonOut := flag.Bool("json", false, "print result as JSON")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [--json] <git-repository-url>\n", os.Args[0])
+		flag.PrintDefaults()
 	}
-	repoUrl := os.Args[1]
-	tmpDir, err := os.MkdirTemp("", "prefix-")
+	flag.Parse()
+	if flag.NArg() != 1 {
+		flag.Usage()
+		return 2
+	}
+	repoURL := flag.Arg(0)
+
+	tmpDir, err := os.MkdirTemp("", "gmuc-")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create temporary directory: %v\n", err)
-		os.Exit(3)
+		fmt.Fprintf(os.Stderr, "failed to create temporary directory: %v\n", err)
+		return 3
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	repoDir := filepath.Join(tmpDir, "repo")
 
-	cmd := exec.Command("git", "clone", "--depth=1", repoUrl, repoDir)
-	out, err := cmd.CombinedOutput()
+	cloneCtx, cancelClone := context.WithTimeout(context.Background(), cloneTimeout)
+	defer cancelClone()
+
+	gitCmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth=1", "--single-branch", repoURL, repoDir)
+	gitCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	gitOut, err := gitCmd.CombinedOutput()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to clone repository: %v\n", err)
-		fmt.Fprintln(os.Stderr, string(out))
-		os.Exit(4)
-	}
-	info, err := os.Stat(filepath.Join(repoDir, "go.mod"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to stat go.mod file: %v\n", err)
-		os.Exit(5)
-	}
-	if info.IsDir() {
-		fmt.Fprintf(os.Stderr, "go.mod is a directory: %v\n", info.Name())
-		os.Exit(6)
+		if errors.Is(cloneCtx.Err(), context.DeadlineExceeded) {
+			fmt.Fprintf(os.Stderr, "git clone timed out after %v\n", cloneTimeout)
+			return 4
+		}
+		fmt.Fprintf(os.Stderr, "failed to clone repository: %v\n", err)
+		fmt.Fprintln(os.Stderr, string(gitOut))
+		return 4
 	}
 
-	data, err := os.ReadFile(filepath.Join(repoDir, "go.mod"))
+	goModPath := filepath.Join(repoDir, "go.mod")
+	info, err := os.Stat(goModPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read go.mod file: %v\n", err)
-		os.Exit(7)
+		if os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "not a Go module: go.mod not found in repository root\n")
+			return 5
+		}
+		fmt.Fprintf(os.Stderr, "failed to stat go.mod: %v\n", err)
+		return 5
+	}
+	if info.IsDir() {
+		fmt.Fprintf(os.Stderr, "go.mod is a directory\n")
+		return 6
+	}
+
+	data, err := os.ReadFile(goModPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to read go.mod: %v\n", err)
+		return 7
 	}
 
 	modFile, err := modfile.Parse("go.mod", data, nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse go.mod file: %v\n", err)
-		os.Exit(8)
+		fmt.Fprintf(os.Stderr, "failed to parse go.mod: %v\n", err)
+		return 8
+	}
+	if modFile.Module == nil || modFile.Module.Mod.Path == "" {
+		fmt.Fprintf(os.Stderr, "go.mod has no module directive\n")
+		return 8
+	}
+	if modFile.Go == nil || modFile.Go.Version == "" {
+		fmt.Fprintf(os.Stderr, "go.mod has no go directive\n")
+		return 8
 	}
 
-	cmd = exec.Command("go", "list", "-m", "-u", "-json", "all")
-	cmd.Dir = repoDir
-	out, err = cmd.CombinedOutput()
+	modulePath := modFile.Module.Mod.Path
+	goVer := modFile.Go.Version
+
+	listCtx, cancelList := context.WithTimeout(context.Background(), listTimeout)
+	defer cancelList()
+
+	goCmd := exec.CommandContext(listCtx, "go", "list", "-m", "-u", "-json", "all")
+	goCmd.Dir = repoDir
+	goCmd.Env = os.Environ()
+	listOut, err := goCmd.CombinedOutput()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to list modules: %v\n", err)
-		fmt.Fprintln(os.Stderr, string(out))
-		os.Exit(9)
-	}
-	dec := json.NewDecoder(bytes.NewReader(out))
-	for {
-		var m struct {
-			Path    string `json:"Path"`
-			Version string `json:"Version"`
-			Main    bool   `json:"Main"`
-			Replace struct {
-				Path    string `json:"Path"`
-				Version string `json:"Version"`
-			} `json:"Replace"`
-			Update *struct {
-				Path    string `json:"Path"`
-				Version string `json:"Version"`
-			} `json:"Update"`
+		if errors.Is(listCtx.Err(), context.DeadlineExceeded) {
+			fmt.Fprintf(os.Stderr, "go list timed out after %v\n", listTimeout)
+			return 9
 		}
+		fmt.Fprintf(os.Stderr, "failed to list modules: %v\n", err)
+		fmt.Fprintln(os.Stderr, string(listOut))
+		return 9
+	}
+
+	updates, err := parseModuleUpdates(bytes.NewReader(listOut))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to parse go list output: %v\n", err)
+		return 10
+	}
+
+	res := outputResult{
+		Module:    modulePath,
+		GoVersion: goVer,
+		Updates:   updates,
+	}
+
+	if *jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(res); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write JSON: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	printText(res)
+	return 0
+}
+
+type moduleLine struct {
+	Path     string `json:"Path"`
+	Version  string `json:"Version"`
+	Main     bool   `json:"Main"`
+	Indirect bool   `json:"Indirect"`
+	Update   *struct {
+		Path    string `json:"Path"`
+		Version string `json:"Version"`
+	} `json:"Update"`
+}
+
+type depUpdate struct {
+	Path     string `json:"path"`
+	Current  string `json:"currentVersion"`
+	Latest   string `json:"latestVersion"`
+	Indirect bool   `json:"indirect,omitempty"`
+}
+
+type outputResult struct {
+	Module    string      `json:"module"`
+	GoVersion string      `json:"goVersion"`
+	Updates   []depUpdate `json:"updates"`
+}
+
+func parseModuleUpdates(r io.Reader) ([]depUpdate, error) {
+	dec := json.NewDecoder(r)
+	var out []depUpdate
+	for {
+		var m moduleLine
 		if err := dec.Decode(&m); err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
-			fmt.Fprintf(os.Stderr, "Failed to decode module: %v\n", err)
-			os.Exit(10)
+			return nil, err
 		}
 		if m.Main || m.Update == nil {
 			continue
 		}
-		fmt.Println(m.Path)
-		fmt.Println(m.Version)
-		fmt.Println(m.Update.Path)
-		fmt.Println(m.Update.Version)
+		latest := m.Update.Version
+		if latest == "" {
+			continue
+		}
+		out = append(out, depUpdate{
+			Path:     m.Path,
+			Current:  m.Version,
+			Latest:   latest,
+			Indirect: m.Indirect,
+		})
 	}
-	
-	fmt.Println("--------------------------------")	
-	fmt.Println("Module:", modFile.Module.Mod.Path)
-	fmt.Println("Go:", modFile.Go.Version)
-	fmt.Println("--------------------------------")
+	return out, nil
+}
+
+func printText(res outputResult) {
+	fmt.Printf("module: %s\n", res.Module)
+	fmt.Printf("go: %s\n", res.GoVersion)
+	fmt.Println("updates:")
+	if len(res.Updates) == 0 {
+		fmt.Println("  (none)")
+		return
+	}
+	for _, u := range res.Updates {
+		kind := "direct"
+		if u.Indirect {
+			kind = "indirect"
+		}
+		fmt.Printf("  - %s: %s -> %s (%s)\n", u.Path, u.Current, u.Latest, kind)
+	}
 }
