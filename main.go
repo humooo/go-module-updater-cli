@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"os"
 	"path/filepath"
+	"golang.org/x/mod/modfile"
 )
 
 func main() {
@@ -38,5 +39,19 @@ func main() {
 		fmt.Fprintf(os.Stderr, "go.mod is a directory: %v\n", info.Name())
 		os.Exit(6)
 	}
-	fmt.Println(info.Name())
+
+	data, err := os.ReadFile(filepath.Join(repoDir, "go.mod"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read go.mod file: %v\n", err)
+		os.Exit(7)
+	}
+
+	modFile, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse go.mod file: %v\n", err)
+		os.Exit(8)
+	}
+
+	fmt.Println("Module: ", modFile.Module.Mod.Path)
+	fmt.Println("Go: ", modFile.Go.Version)
 }
