@@ -29,5 +29,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, string(out))
 		os.Exit(4)
 	}
-	fmt.Println(string(out))
+	info, err := os.Stat(filepath.Join(repoDir, "go.mod"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to stat go.mod file: %v\n", err)
+		os.Exit(5)
+	}
+	if info.IsDir() {
+		fmt.Fprintf(os.Stderr, "go.mod is a directory: %v\n", info.Name())
+		os.Exit(6)
+	}
+	fmt.Println(info.Name())
 }
