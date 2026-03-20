@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"golang.org/x/mod/modfile"
+	"encoding/json"
+	"bytes"
+	"io"
 )
 
 func main() {
@@ -52,6 +55,47 @@ func main() {
 		os.Exit(8)
 	}
 
-	fmt.Println("Module: ", modFile.Module.Mod.Path)
-	fmt.Println("Go: ", modFile.Go.Version)
+	cmd = exec.Command("go", "list", "-m", "-u", "-json", "all")
+	cmd.Dir = repoDir
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to list modules: %v\n", err)
+		fmt.Fprintln(os.Stderr, string(out))
+		os.Exit(9)
+	}
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for {
+		var m struct {
+			Path    string `json:"Path"`
+			Version string `json:"Version"`
+			Main    bool   `json:"Main"`
+			Replace struct {
+				Path    string `json:"Path"`
+				Version string `json:"Version"`
+			} `json:"Replace"`
+			Update *struct {
+				Path    string `json:"Path"`
+				Version string `json:"Version"`
+			} `json:"Update"`
+		}
+		if err := dec.Decode(&m); err != nil {
+			if err == io.EOF {
+				break
+			}
+			fmt.Fprintf(os.Stderr, "Failed to decode module: %v\n", err)
+			os.Exit(10)
+		}
+		if m.Main || m.Update == nil {
+			continue
+		}
+		fmt.Println(m.Path)
+		fmt.Println(m.Version)
+		fmt.Println(m.Update.Path)
+		fmt.Println(m.Update.Version)
+	}
+	
+	fmt.Println("--------------------------------")	
+	fmt.Println("Module:", modFile.Module.Mod.Path)
+	fmt.Println("Go:", modFile.Go.Version)
+	fmt.Println("--------------------------------")
 }
