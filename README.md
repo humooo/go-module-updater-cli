@@ -1,0 +1,1 @@
+# go-module-updater-cli
