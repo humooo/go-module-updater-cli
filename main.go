@@ -5,11 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/humooo/go-module-updater-cli/internal/runner"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -50,16 +50,15 @@ func run() int {
 	cloneCtx, cancelClone := context.WithTimeout(context.Background(), cloneTimeout)
 	defer cancelClone()
 
-	gitCmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth=1", "--single-branch", repoURL, repoDir)
-	gitCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	gitOut, err := gitCmd.CombinedOutput()
+	r := runner.ExecRunner{}
+	out, err := r.Run(cloneCtx, "", "git", "clone", "--depth=1", "--single-branch", repoURL, repoDir)
 	if err != nil {
 		if errors.Is(cloneCtx.Err(), context.DeadlineExceeded) {
 			fmt.Fprintf(os.Stderr, "git clone timed out after %v\n", cloneTimeout)
 			return 4
 		}
 		fmt.Fprintf(os.Stderr, "failed to clone repository: %v\n", err)
-		fmt.Fprintln(os.Stderr, string(gitOut))
+		fmt.Fprintln(os.Stderr, string(out))
 		return 4
 	}
 
@@ -104,10 +103,7 @@ func run() int {
 	listCtx, cancelList := context.WithTimeout(context.Background(), listTimeout)
 	defer cancelList()
 
-	goCmd := exec.CommandContext(listCtx, "go", "list", "-m", "-u", "-json", "all")
-	goCmd.Dir = repoDir
-	goCmd.Env = os.Environ()
-	listOut, err := goCmd.CombinedOutput()
+	listOut, err := r.Run(listCtx, repoDir, "go", "list", "-m", "-u", "-json", "all")
 	if err != nil {
 		if errors.Is(listCtx.Err(), context.DeadlineExceeded) {
 			fmt.Fprintf(os.Stderr, "go list timed out after %v\n", listTimeout)
