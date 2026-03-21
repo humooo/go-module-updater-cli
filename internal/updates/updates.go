@@ -1,0 +1,56 @@
+package updates
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+)
+
+type moduleLine struct {
+	Path     string `json:"Path"`
+	Version  string `json:"Version"`
+	Main     bool   `json:"Main"`
+	Indirect bool   `json:"Indirect"`
+	Update   *struct {
+		Path    string `json:"Path"`
+		Version string `json:"Version"`
+	} `json:"Update"`
+}
+
+type DepUpdate struct {
+	Path     string `json:"path"`
+	Current  string `json:"currentVersion"`
+	Latest   string `json:"latestVersion"`
+	Indirect bool   `json:"indirect,omitempty"`
+}
+
+func Parse(r io.Reader) ([]DepUpdate, error) {
+	dec := json.NewDecoder(r)
+	var out []DepUpdate
+	for {
+		var m moduleLine
+		if err := dec.Decode(&m); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+
+		if m.Main || m.Update == nil {
+			continue
+		}
+
+		latest := m.Update.Version
+		if latest == "" {
+			continue
+		}
+
+		out = append(out, DepUpdate{
+			Path:     m.Path,
+			Current:  m.Version,
+			Latest:   latest,
+			Indirect: m.Indirect,
+		})
+	}
+	return out, nil
+}

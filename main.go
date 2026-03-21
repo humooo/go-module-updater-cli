@@ -5,15 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/humooo/go-module-updater-cli/internal/runner"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/humooo/go-module-updater-cli/internal/modinfo"
+	"github.com/humooo/go-module-updater-cli/internal/runner"
+	"github.com/humooo/go-module-updater-cli/internal/updates"
 )
 
 const (
@@ -105,7 +105,7 @@ func run() int {
 		return 9
 	}
 
-	updates, err := parseModuleUpdates(bytes.NewReader(listOut))
+	depUpdates, err := updates.Parse(bytes.NewReader(listOut))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to parse go list output: %v\n", err)
 		return 10
@@ -114,7 +114,7 @@ func run() int {
 	res := outputResult{
 		Module:    modulePath,
 		GoVersion: goVer,
-		Updates:   updates,
+		Updates:   depUpdates,
 	}
 
 	if *jsonOut {
@@ -131,56 +131,12 @@ func run() int {
 	return 0
 }
 
-type moduleLine struct {
-	Path     string `json:"Path"`
-	Version  string `json:"Version"`
-	Main     bool   `json:"Main"`
-	Indirect bool   `json:"Indirect"`
-	Update   *struct {
-		Path    string `json:"Path"`
-		Version string `json:"Version"`
-	} `json:"Update"`
-}
 
-type depUpdate struct {
-	Path     string `json:"path"`
-	Current  string `json:"currentVersion"`
-	Latest   string `json:"latestVersion"`
-	Indirect bool   `json:"indirect,omitempty"`
-}
 
 type outputResult struct {
 	Module    string      `json:"module"`
 	GoVersion string      `json:"goVersion"`
-	Updates   []depUpdate `json:"updates"`
-}
-
-func parseModuleUpdates(r io.Reader) ([]depUpdate, error) {
-	dec := json.NewDecoder(r)
-	var out []depUpdate
-	for {
-		var m moduleLine
-		if err := dec.Decode(&m); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return nil, err
-		}
-		if m.Main || m.Update == nil {
-			continue
-		}
-		latest := m.Update.Version
-		if latest == "" {
-			continue
-		}
-		out = append(out, depUpdate{
-			Path:     m.Path,
-			Current:  m.Version,
-			Latest:   latest,
-			Indirect: m.Indirect,
-		})
-	}
-	return out, nil
+	Updates   []updates.DepUpdate `json:"updates"`
 }
 
 func printText(res outputResult) {
