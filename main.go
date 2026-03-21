@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"golang.org/x/mod/modfile"
+	"github.com/humooo/go-module-updater-cli/internal/modinfo"
 )
 
 const (
@@ -82,23 +82,14 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "failed to read go.mod: %v\n", err)
 		return 7
 	}
-
-	modFile, err := modfile.Parse("go.mod", data, nil)
+	modInfo, err := modinfo.Parse(data)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to parse go.mod: %v\n", err)
 		return 8
 	}
-	if modFile.Module == nil || modFile.Module.Mod.Path == "" {
-		fmt.Fprintf(os.Stderr, "go.mod has no module directive\n")
-		return 8
-	}
-	if modFile.Go == nil || modFile.Go.Version == "" {
-		fmt.Fprintf(os.Stderr, "go.mod has no go directive\n")
-		return 8
-	}
 
-	modulePath := modFile.Module.Mod.Path
-	goVer := modFile.Go.Version
+	modulePath := modInfo.Module
+	goVer := modInfo.GoVersion
 
 	listCtx, cancelList := context.WithTimeout(context.Background(), listTimeout)
 	defer cancelList()
