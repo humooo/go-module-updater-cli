@@ -21,7 +21,7 @@ type DepUpdate struct {
 	Path     string `json:"path"`
 	Current  string `json:"currentVersion"`
 	Latest   string `json:"latestVersion"`
-	Indirect bool   `json:"indirect,omitempty"`
+	Indirect bool   `json:"indirect"`
 }
 
 func Parse(r io.Reader) ([]DepUpdate, error) {
