@@ -40,8 +40,8 @@ func fail(code int, format string, args ...any) *cliError {
 	}
 }
 
-func failWithDetails(code int, out []byte, format string, args ...any) *cliError {
-	details := string(out)
+func failWithDetails(code int, out runner.Output, format string, args ...any) *cliError {
+	details := string(out.Stderr)
 	if len(details) > 1000 {
 		details = details[:1000] + "..."
 	}
@@ -95,9 +95,13 @@ func execute(name string, args []string, stdout, stderr io.Writer, r runner.Runn
 	if err := flags.Parse(args); err != nil {
 		return fail(2, "invalid arguments: %v", err)
 	}
-	if flags.NArg() != 1 {
+	switch n := flags.NArg(); {
+	case n == 0:
 		flags.Usage()
 		return fail(2, "missing repository URL")
+	case n > 1:
+		flags.Usage()
+		return fail(2, "expected exactly one repository URL")
 	}
 	repoURL := flags.Arg(0)
 
@@ -139,7 +143,7 @@ func execute(name string, args []string, stdout, stderr io.Writer, r runner.Runn
 	}
 	modInfo, err := modinfo.Parse(data)
 	if err != nil {
-		return failWithDetails(1, data, "failed to parse go.mod: %v", err)
+		return failWithDetails(1, runner.Output{Stderr: data}, "failed to parse go.mod: %v", err)
 	}
 
 	modulePath := modInfo.Module
@@ -156,7 +160,7 @@ func execute(name string, args []string, stdout, stderr io.Writer, r runner.Runn
 		return failWithDetails(1, listOut, "failed to list modules: %v", err)
 	}
 
-	depUpdates, err := updates.Parse(bytes.NewReader(listOut))
+	depUpdates, err := updates.Parse(bytes.NewReader(listOut.Stdout))
 	if err != nil {
 		return failWithDetails(1, listOut, "failed to parse go list output: %v", err)
 	}
@@ -169,7 +173,7 @@ func execute(name string, args []string, stdout, stderr io.Writer, r runner.Runn
 
 	if *jsonOut {
 		if err := writeJSON(stdout, res); err != nil {
-			return failWithDetails(1, nil, "failed to write JSON: %v", err)
+			return failWithDetails(1, runner.Output{}, "failed to write JSON: %v", err)
 		}
 		return nil
 	}
