@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -167,5 +168,49 @@ func TestRealMain_HappyPathJSON(t *testing.T) {
 	}
 	if res.Updates[1].Path != "dep.example/y" || res.Updates[1].Indirect != true {
 		t.Errorf("Updates[1] = %+v, unexpected", res.Updates[1])
+	}
+}
+
+func TestRealMain_GitNotFound(t *testing.T) {
+	fake := &fakeRunner{handler: func(_ context.Context, _, cmd string, _ ...string) (runner.Output, error) {
+		if cmd == "git" {
+			return runner.Output{}, &exec.Error{Name: "git", Err: exec.ErrNotFound}
+		}
+		return runner.Output{}, nil
+	}}
+	var stdout, stderr bytes.Buffer
+	code := realMain("gmuc", []string{"https://example.com/repo.git"}, &stdout, &stderr, fake)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "git not found in PATH") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), "git not found in PATH")
+	}
+}
+
+func TestRealMain_GoNotFound(t *testing.T) {
+	fake := &fakeRunner{handler: func(_ context.Context, _ string, cmd string, args ...string) (runner.Output, error) {
+		if cmd == "git" {
+			repoDir := args[len(args)-1]
+			if err := os.MkdirAll(repoDir, 0o755); err != nil {
+				return runner.Output{}, fmt.Errorf("fake: mkdir: %w", err)
+			}
+			if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte(validGoMod), 0o644); err != nil {
+				return runner.Output{}, fmt.Errorf("fake: write go.mod: %w", err)
+			}
+			return runner.Output{}, nil
+		}
+		if cmd == "go" {
+			return runner.Output{}, &exec.Error{Name: "go", Err: exec.ErrNotFound}
+		}
+		return runner.Output{}, nil
+	}}
+	var stdout, stderr bytes.Buffer
+	code := realMain("gmuc", []string{"https://example.com/repo.git"}, &stdout, &stderr, fake)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "go not found in PATH") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), "go not found in PATH")
 	}
 }

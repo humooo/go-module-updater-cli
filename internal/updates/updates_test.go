@@ -57,6 +57,15 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
+			name: "sorted_output",
+			input: `{"Path":"dep.example/z","Version":"v1.0.0","Update":{"Path":"dep.example/z","Version":"v1.2.0"}}
+{"Path":"dep.example/a","Version":"v0.1.0","Update":{"Path":"dep.example/a","Version":"v0.2.0"}}`,
+			want: []DepUpdate{
+				{Path: "dep.example/a", Current: "v0.1.0", Latest: "v0.2.0", Indirect: false},
+				{Path: "dep.example/z", Current: "v1.0.0", Latest: "v1.2.0", Indirect: false},
+			},
+		},
+		{
 			name:    "invalid_json",
 			input:   `{`,
 			wantErr: true,

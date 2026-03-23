@@ -1,10 +1,10 @@
 package runner
 
 import (
-	"context"
-	"os/exec"
-	"os"
 	"bytes"
+	"context"
+	"os"
+	"os/exec"
 )
 
 type Output struct {
@@ -16,7 +16,7 @@ type Runner interface {
 	Run(ctx context.Context, dir string, cmd string, args ...string) (Output, error)
 }
 
-type ExecRunner struct {}
+type ExecRunner struct{}
 
 func (r *ExecRunner) Run(ctx context.Context, dir string, cmd string, args ...string) (Output, error) {
 	c := exec.CommandContext(ctx, cmd, args...)
