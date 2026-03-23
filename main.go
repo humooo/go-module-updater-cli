@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -18,8 +19,8 @@ import (
 )
 
 const (
-	cloneTimeout = 15 * time.Minute
-	listTimeout  = 20 * time.Minute
+	defaultCloneTimeout = 15 * time.Minute
+	defaultListTimeout  = 20 * time.Minute
 )
 
 type cliError struct {
@@ -40,8 +41,8 @@ func fail(code int, format string, args ...any) *cliError {
 	}
 }
 
-func failWithDetails(code int, out []byte, format string, args ...any) *cliError {
-	details := string(out)
+func failWithDetails(code int, out runner.Output, format string, args ...any) *cliError {
+	details := string(out.Stderr)
 	if len(details) > 1000 {
 		details = details[:1000] + "..."
 	}
@@ -88,16 +89,22 @@ func execute(name string, args []string, stdout, stderr io.Writer, r runner.Runn
 	flags := flag.NewFlagSet(filepath.Base(name), flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	jsonOut := flags.Bool("json", false, "print result as JSON")
+	cloneTimeout := flags.Duration("clone-timeout", defaultCloneTimeout, "timeout for git clone")
+	listTimeout := flags.Duration("list-timeout", defaultListTimeout, "timeout for go list")
 	flags.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: %s [--json] <git-repository-url>\n", filepath.Base(name))
+		fmt.Fprintf(stderr, "Usage: %s [flags] <git-repository-url>\n\nFlags:\n", filepath.Base(name))
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
 		return fail(2, "invalid arguments: %v", err)
 	}
-	if flags.NArg() != 1 {
+	switch n := flags.NArg(); {
+	case n == 0:
 		flags.Usage()
 		return fail(2, "missing repository URL")
+	case n > 1:
+		flags.Usage()
+		return fail(2, "expected exactly one repository URL")
 	}
 	repoURL := flags.Arg(0)
 
@@ -109,73 +116,98 @@ func execute(name string, args []string, stdout, stderr io.Writer, r runner.Runn
 
 	repoDir := filepath.Join(tmpDir, "repo")
 
-	cloneCtx, cancelClone := context.WithTimeout(context.Background(), cloneTimeout)
-	defer cancelClone()
-
-	out, err := r.Run(cloneCtx, "", "git", "clone", "--depth=1", "--single-branch", repoURL, repoDir)
-	if err != nil {
-		if errors.Is(cloneCtx.Err(), context.DeadlineExceeded) {
-			return fail(1, "git clone timed out after %v", cloneTimeout)
-		}
-		return failWithDetails(1, out, "failed to clone repository: %v", err)
-
+	if err := cloneRepo(context.Background(), r, repoURL, repoDir, *cloneTimeout); err != nil {
+		return err
 	}
 
-	goModPath := filepath.Join(repoDir, "go.mod")
-	info, err := os.Stat(goModPath)
+	modInfo, err := readModuleInfo(repoDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return fail(1, "not a Go module: go.mod not found in repository root")
-		}
-		return fail(1, "failed to stat go.mod: %v", err)
-	}
-	if info.IsDir() {
-		return fail(1, "go.mod is a directory")
+		return err
 	}
 
-	data, err := os.ReadFile(goModPath)
+	depUpdates, err := listUpdates(context.Background(), r, repoDir, *listTimeout)
 	if err != nil {
-		return fail(1, "failed to read go.mod: %v", err)
-	}
-	modInfo, err := modinfo.Parse(data)
-	if err != nil {
-		return failWithDetails(1, data, "failed to parse go.mod: %v", err)
-	}
-
-	modulePath := modInfo.Module
-	goVer := modInfo.GoVersion
-
-	listCtx, cancelList := context.WithTimeout(context.Background(), listTimeout)
-	defer cancelList()
-
-	listOut, err := r.Run(listCtx, repoDir, "go", "list", "-m", "-u", "-json", "all")
-	if err != nil {
-		if errors.Is(listCtx.Err(), context.DeadlineExceeded) {
-			return fail(1, "go list timed out after %v", listTimeout)
-		}
-		return failWithDetails(1, listOut, "failed to list modules: %v", err)
-	}
-
-	depUpdates, err := updates.Parse(bytes.NewReader(listOut))
-	if err != nil {
-		return failWithDetails(1, listOut, "failed to parse go list output: %v", err)
+		return err
 	}
 
 	res := outputResult{
-		Module:    modulePath,
-		GoVersion: goVer,
+		Module:    modInfo.Module,
+		GoVersion: modInfo.GoVersion,
 		Updates:   depUpdates,
 	}
 
 	if *jsonOut {
 		if err := writeJSON(stdout, res); err != nil {
-			return failWithDetails(1, nil, "failed to write JSON: %v", err)
+			return failWithDetails(1, runner.Output{}, "failed to write JSON: %v", err)
 		}
 		return nil
 	}
 
 	printText(stdout, res)
 	return nil
+}
+
+func cloneRepo(ctx context.Context, r runner.Runner, url, destDir string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	out, err := r.Run(ctx, "", "git", "clone", "--depth=1", "--single-branch", url, destDir)
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return fail(1, "git not found in PATH; please install git")
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fail(1, "git clone timed out after %v", timeout)
+		}
+		return failWithDetails(1, out, "failed to clone repository: %v", err)
+	}
+	return nil
+}
+
+func readModuleInfo(repoDir string) (modinfo.Info, error) {
+	goModPath := filepath.Join(repoDir, "go.mod")
+	info, err := os.Stat(goModPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return modinfo.Info{}, fail(1, "not a Go module: go.mod not found in repository root")
+		}
+		return modinfo.Info{}, fail(1, "failed to stat go.mod: %v", err)
+	}
+	if info.IsDir() {
+		return modinfo.Info{}, fail(1, "go.mod is a directory")
+	}
+
+	data, err := os.ReadFile(goModPath)
+	if err != nil {
+		return modinfo.Info{}, fail(1, "failed to read go.mod: %v", err)
+	}
+	modInfo, err := modinfo.Parse(data)
+	if err != nil {
+		return modinfo.Info{}, failWithDetails(1, runner.Output{Stderr: data}, "failed to parse go.mod: %v", err)
+	}
+	return modInfo, nil
+}
+
+func listUpdates(ctx context.Context, r runner.Runner, repoDir string, timeout time.Duration) ([]updates.DepUpdate, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	out, err := r.Run(ctx, repoDir, "go", "list", "-m", "-u", "-json", "all")
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return nil, fail(1, "go not found in PATH; please install Go")
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fail(1, "go list timed out after %v", timeout)
+		}
+		return nil, failWithDetails(1, out, "failed to list modules: %v", err)
+	}
+
+	depUpdates, err := updates.Parse(bytes.NewReader(out.Stdout))
+	if err != nil {
+		return nil, failWithDetails(1, out, "failed to parse go list output: %v", err)
+	}
+	return depUpdates, nil
 }
 
 type outputResult struct {

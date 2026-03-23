@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sort"
 )
 
 type moduleLine struct {
@@ -21,7 +22,7 @@ type DepUpdate struct {
 	Path     string `json:"path"`
 	Current  string `json:"currentVersion"`
 	Latest   string `json:"latestVersion"`
-	Indirect bool   `json:"indirect,omitempty"`
+	Indirect bool   `json:"indirect"`
 }
 
 func Parse(r io.Reader) ([]DepUpdate, error) {
@@ -52,5 +53,8 @@ func Parse(r io.Reader) ([]DepUpdate, error) {
 			Indirect: m.Indirect,
 		})
 	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Path < out[j].Path
+	})
 	return out, nil
 }
