@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/humooo/go-module-updater-cli/internal/runner"
 	"github.com/humooo/go-module-updater-cli/internal/updates"
@@ -76,8 +77,95 @@ func TestRealMain_InvalidFlag(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2", code)
 	}
-	if !strings.Contains(stderr.String(), "invalid arguments") {
-		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), "invalid arguments")
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "invalid arguments: flag provided but not defined: -bad") {
+		t.Errorf("stderr = %q, want clean invalid-flag message", errOut)
+	}
+	if strings.Contains(errOut, "Usage:") || strings.Contains(errOut, "Flags:") {
+		t.Errorf("stderr = %q, do not expect usage dump for invalid flag", errOut)
+	}
+}
+
+func TestRealMain_Help(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := realMain("gmuc", []string{"--help"}, &stdout, &stderr, &fakeRunner{handler: happyRunner})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Usage: gmuc [flags] <git-repository-url>") {
+		t.Fatalf("stdout = %q, want usage header", out)
+	}
+	if !strings.Contains(out, "-json") {
+		t.Fatalf("stdout = %q, want flags list", out)
+	}
+}
+
+func TestRealMain_InvalidGoMod_NoRawFileInDetails(t *testing.T) {
+	fake := &fakeRunner{handler: func(_ context.Context, _, cmd string, args ...string) (runner.Output, error) {
+		if cmd == "git" {
+			repoDir := args[len(args)-1]
+			if err := os.MkdirAll(repoDir, 0o755); err != nil {
+				return runner.Output{}, err
+			}
+			bad := "replace private.local/foo => ../secret\nnot a valid modfile\n"
+			if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte(bad), 0o644); err != nil {
+				return runner.Output{}, err
+			}
+			return runner.Output{}, nil
+		}
+		return runner.Output{}, nil
+	}}
+	var stdout, stderr bytes.Buffer
+	code := realMain("gmuc", []string{"https://example.com/repo.git"}, &stdout, &stderr, fake)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if strings.Contains(stderr.String(), "details:") {
+		t.Errorf("stderr should not include a details section with raw go.mod; got %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "private.local") {
+		t.Errorf("stderr should not leak go.mod contents; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "failed to parse go.mod") {
+		t.Errorf("stderr = %q, want parse failure message", stderr.String())
+	}
+}
+
+func TestCloneRepo_Timeout(t *testing.T) {
+	slow := &fakeRunner{handler: func(ctx context.Context, _ string, cmd string, _ ...string) (runner.Output, error) {
+		if cmd != "git" {
+			return runner.Output{}, fmt.Errorf("unexpected cmd %q", cmd)
+		}
+		<-ctx.Done()
+		return runner.Output{}, context.DeadlineExceeded
+	}}
+	err := cloneRepo(context.Background(), slow, "https://example.com/r.git", filepath.Join(t.TempDir(), "repo"), time.Millisecond)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestListUpdates_Timeout(t *testing.T) {
+	slow := &fakeRunner{handler: func(ctx context.Context, _ string, cmd string, _ ...string) (runner.Output, error) {
+		if cmd != "go" {
+			return runner.Output{}, fmt.Errorf("unexpected cmd %q", cmd)
+		}
+		<-ctx.Done()
+		return runner.Output{}, context.DeadlineExceeded
+	}}
+	_, err := listUpdates(context.Background(), slow, t.TempDir(), time.Millisecond)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("got %v", err)
 	}
 }
 

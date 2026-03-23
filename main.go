@@ -41,7 +41,7 @@ func fail(code int, format string, args ...any) *cliError {
 	}
 }
 
-func failWithDetails(code int, out runner.Output, format string, args ...any) *cliError {
+func failWithContext(code int, out runner.Output, format string, args ...any) *cliError {
 	details := string(out.Stderr)
 	if len(details) > 1000 {
 		details = details[:1000] + "..."
@@ -87,17 +87,25 @@ func printError(w io.Writer, err error) {
 
 func execute(name string, args []string, stdout, stderr io.Writer, r runner.Runner) error {
 	flags := flag.NewFlagSet(filepath.Base(name), flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	var flagOut bytes.Buffer
+	flags.SetOutput(&flagOut)
 	jsonOut := flags.Bool("json", false, "print result as JSON")
 	cloneTimeout := flags.Duration("clone-timeout", defaultCloneTimeout, "timeout for git clone")
 	listTimeout := flags.Duration("list-timeout", defaultListTimeout, "timeout for go list")
 	flags.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: %s [flags] <git-repository-url>\n\nFlags:\n", filepath.Base(name))
+		fmt.Fprintf(flags.Output(), "Usage: %s [flags] <git-repository-url>\n\nFlags:\n", filepath.Base(name))
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			if flagOut.Len() > 0 {
+				_, _ = stdout.Write(flagOut.Bytes())
+			}
+			return nil
+		}
 		return fail(2, "invalid arguments: %v", err)
 	}
+	flags.SetOutput(stderr)
 	switch n := flags.NArg(); {
 	case n == 0:
 		flags.Usage()
@@ -138,7 +146,7 @@ func execute(name string, args []string, stdout, stderr io.Writer, r runner.Runn
 
 	if *jsonOut {
 		if err := writeJSON(stdout, res); err != nil {
-			return failWithDetails(1, runner.Output{}, "failed to write JSON: %v", err)
+			return failWithContext(1, runner.Output{}, "failed to write JSON: %v", err)
 		}
 		return nil
 	}
@@ -159,7 +167,7 @@ func cloneRepo(ctx context.Context, r runner.Runner, url, destDir string, timeou
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return fail(1, "git clone timed out after %v", timeout)
 		}
-		return failWithDetails(1, out, "failed to clone repository: %v", err)
+		return failWithContext(1, out, "failed to clone repository: %v", err)
 	}
 	return nil
 }
@@ -183,7 +191,7 @@ func readModuleInfo(repoDir string) (modinfo.Info, error) {
 	}
 	modInfo, err := modinfo.Parse(data)
 	if err != nil {
-		return modinfo.Info{}, failWithDetails(1, runner.Output{Stderr: data}, "failed to parse go.mod: %v", err)
+		return modinfo.Info{}, fail(1, "failed to parse go.mod: %v", err)
 	}
 	return modInfo, nil
 }
@@ -200,12 +208,12 @@ func listUpdates(ctx context.Context, r runner.Runner, repoDir string, timeout t
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fail(1, "go list timed out after %v", timeout)
 		}
-		return nil, failWithDetails(1, out, "failed to list modules: %v", err)
+		return nil, failWithContext(1, out, "failed to list modules: %v", err)
 	}
 
 	depUpdates, err := updates.Parse(bytes.NewReader(out.Stdout))
 	if err != nil {
-		return nil, failWithDetails(1, out, "failed to parse go list output: %v", err)
+		return nil, failWithContext(1, out, "failed to parse go list output: %v", err)
 	}
 	return depUpdates, nil
 }
